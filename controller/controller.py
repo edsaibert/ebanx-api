@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+import json
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -7,6 +8,12 @@ from models import Account, Event
 from schema import AccountSchema
 
 router = APIRouter(prefix="", tags=["all"])
+
+@router.post("/reset")
+def reset_state(db: Session = Depends(get_db)):
+    db.execute(text("DELETE FROM account"))
+    db.commit()
+    return Response(content="OK", status_code=200)
 
 @router.get("/balance")
 def get_balance(account_id: int, db: Session = Depends(get_db)):
@@ -17,26 +24,24 @@ def get_balance(account_id: int, db: Session = Depends(get_db)):
     account = result.fetchone()
 
     if account is not None:
-        return {"balance": account.balance}
+        return Response(content=str(account.balance), status_code=200)
     else:
-        # return 404
-        raise HTTPException(
-            status_code = 404,
-            detail = 0
-        )
+        return Response(content="0", status_code=404)
     
 @router.post("/event")
 def post_event(event: Event, db: Session = Depends(get_db)):
-    if event.type == "deposit" or event.type == "withdraw":
-        ret = handle_account_event(event, db)
-    elif event.type == "transfer":
-        ret = handle_transaction_event(event, db)
-    else:
-        raise HTTPException(
-            status_code = 400,
-            detail = "Invalid event type"
-        )
-    return ret
+    try:
+        if event.type == "deposit" or event.type == "withdraw":
+            ret = handle_account_event(event, db)
+        elif event.type == "transfer":
+            ret = handle_transaction_event(event, db)
+        else:
+            return Response(content="0", status_code=400)
+        return Response(content=json.dumps(ret), status_code=201, media_type="application/json")
+    except HTTPException as e:
+        if e.status_code == 404:
+            return Response(content="0", status_code=404)
+        raise
 
 def create_account(db: Session, account_id: int, balance: float):
     new_account = AccountSchema(id=account_id, balance=balance)
@@ -47,35 +52,29 @@ def create_account(db: Session, account_id: int, balance: float):
 
 def handle_account_event(event: Event, db: Session):
     if event.type == "deposit":
-        # check if account exists
-        account = db.get(AccountSchema, event.origin)
+        account = db.get(AccountSchema, event.destination)
         if account is None:
             # create account
-            new_account = create_account(db, event.origin, event.amount)
-            return {"destination": {"id": new_account.id, "balance": new_account.balance}}
-        
+            new_account = create_account(db, event.destination, event.amount)
+            return {"destination": {"id": str(new_account.id), "balance": new_account.balance}}
         else:
             # update account balance
             account.balance += event.amount
             db.commit()
             db.refresh(account)
-            return {"destination": {"id": account.id, "balance": account.balance}}
+            return {"destination": {"id": str(account.id), "balance": account.balance}}
 
     elif event.type == "withdraw":
         account = db.get(AccountSchema, event.origin)
-        # check if account exists
         if account is None:
             raise HTTPException(
-                status_code = 404,
-                detail = 0
+                status_code=404,
+                detail=0
             )
-        
-        # update account balance
         account.balance -= event.amount
         db.commit()
         db.refresh(account)
-
-        return {"origin": {"id": account.id, "balance": account.balance}}
+        return {"origin": {"id": str(account.id), "balance": account.balance}}
 
 
 def handle_transaction_event(event: Event, db: Session):
@@ -101,6 +100,6 @@ def handle_transaction_event(event: Event, db: Session):
     db.refresh(origin_account)
     db.refresh(destination_account)
     return {
-        "origin": {"id": origin_account.id, "balance": origin_account.balance},
-        "destination": {"id": destination_account.id, "balance": destination_account.balance}
+        "origin": {"id": str(origin_account.id), "balance": origin_account.balance},
+        "destination": {"id": str(destination_account.id), "balance": destination_account.balance}
     }
